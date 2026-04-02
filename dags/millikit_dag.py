@@ -117,7 +117,7 @@ def classify_doc(**context):
 {{"doc_id": {doc['doc_id']}, "type": "유형", "reason": "한 줄 근거"}}"""
 
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-4.5-haiku",
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -157,35 +157,38 @@ def generate_sql(**context):
         doc_type = type_map.get(doc["doc_id"], "기타_특수")
         fewshot = _load_fewshot(doc_type)
 
-        prompt = f"""당신은 밀리의서재 개인정보 추출 SQL 전문가입니다.
+        # 캐싱 대상: 규칙 + FewShot (고정 내용) → system에 cache_control 적용
+        # 변동 내용(결재 제목·본문)은 user로 분리
+        system_content = (
+            "당신은 밀리의서재 개인정보 추출 SQL 전문가입니다.\n\n"
+            "## 규칙\n"
+            "- mem_seq(회원번호)만 추출 — 개인정보 직접 추출 금지\n"
+            "- 테이블은 millie-analysis 프로젝트만 사용\n"
+            "- 공통 필터 항상 포함: test_yn='N', millie_yn='N', dormant_yn='N', member_status != '탈퇴회원'\n"
+            "- 조건 불명확 시 SQL 대신 확인 필요 사항 명시\n\n"
+            f"## 과거 유사 처리 예시 [{doc_type}]\n"
+            f"{fewshot}"
+        )
 
-## 규칙
-- mem_seq(회원번호)만 추출 — 개인정보 직접 추출 금지
-- 테이블은 millie-analysis 프로젝트만 사용
-- 공통 필터 항상 포함: test_yn='N', millie_yn='N', dormant_yn='N', member_status != '탈퇴회원'
-- 조건 불명확 시 SQL 대신 확인 필요 사항 명시
-
-## 과거 유사 처리 예시 [{doc_type}]
-{fewshot}
-
-## 신규 요청
-결재 제목: {doc['doc_title']}
-결재 내용:
-{doc['doc_contents']}
-
-반드시 JSON으로만 응답:
-{{
-  "doc_id": {doc['doc_id']},
-  "request_type": "{doc_type}",
-  "conditions": "핵심 조건 한 줄 요약",
-  "sql_draft": "SQL 또는 확인필요내용",
-  "needs_review": true또는false
-}}"""
+        user_content = (
+            f"결재 제목: {doc['doc_title']}\n"
+            f"결재 내용:\n{doc['doc_contents']}\n\n"
+            f"반드시 JSON으로만 응답:\n"
+            f'{{"doc_id": {doc["doc_id"]}, "request_type": "{doc_type}", '
+            f'"conditions": "핵심 조건 한 줄 요약", '
+            f'"sql_draft": "SQL 또는 확인필요내용", '
+            f'"needs_review": true또는false}}'
+        )
 
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-4.5-sonnet",
             max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
+            system=[{
+                "type": "text",
+                "text": system_content,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": user_content}],
         )
 
         raw = msg.content[0].text.strip()

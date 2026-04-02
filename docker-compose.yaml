@@ -75,6 +75,7 @@ x-airflow-common:
     GW_DB_USER: ${GW_DB_USER}
     GW_DB_PASSWORD: ${GW_DB_PASSWORD}
     GW_DB_NAME: ${GW_DB_NAME:-neos}
+    ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     LAST_DOC_ID: ${LAST_DOC_ID:-0}
     # The following line can be used to set a custom config file, stored in the local config folder
