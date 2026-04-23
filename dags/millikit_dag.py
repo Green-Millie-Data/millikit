@@ -225,26 +225,56 @@ def _load_fewshot(doc_type: str) -> str:
     return content
 
 
-# ── Task 4: 결과 출력 (추후 Slack 알림으로 교체) ────────
-def print_results(**context):
+# ── Task 4: Slack 알림 ────────────────────────────────
+def notify_slack(**context):
+    import os
+    from slack_sdk import WebClient
+    from slack_sdk.errors import SlackApiError
+
     results = context["ti"].xcom_pull(key="sql_results", task_ids="generate_sql")
     if not results:
-        print("결과 없음")
+        print("결과 없음 — Slack 알림 스킵")
         return
 
+    client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
+    channel = os.environ["SLACK_CHANNEL"]
+
     for r in results:
-        print("=" * 60)
-        print(f"doc_id     : {r.get('doc_id')}")
-        print(f"유형       : {r.get('request_type')}")
-        print(f"조건 요약  : {r.get('conditions')}")
-        print(f"검토 필요  : {r.get('needs_review')}")
-        print(f"SQL 초안   :\n{r.get('sql_draft')}")
+        doc_id       = r.get("doc_id", "?")
+        req_type     = r.get("request_type", "?")
+        conditions   = r.get("conditions", "")
+        sql_draft    = r.get("sql_draft", "")
+        needs_review = r.get("needs_review", True)
+        parse_error  = r.get("parse_error", False)
+
+        review_flag = ":warning: *검토 필요*" if needs_review else ":white_check_mark: 검토 불필요"
+
+        if parse_error:
+            text = (
+                f":x: *[millikit] doc_id {doc_id} — 파싱 오류*\n"
+                f"원문:\n```{sql_draft}```"
+            )
+        else:
+            text = (
+                f":memo: *[millikit] 개인정보 추출 SQL 초안* — doc_id `{doc_id}`\n"
+                f"• 유형: `{req_type}`\n"
+                f"• 조건: {conditions}\n"
+                f"• {review_flag}\n\n"
+                f"*SQL 초안*\n```{sql_draft}```"
+            )
+
+        try:
+            client.chat_postMessage(channel=channel, text=text)
+            print(f"[{doc_id}] Slack 전송 완료")
+        except SlackApiError as e:
+            print(f"[{doc_id}] Slack 전송 실패: {e.response['error']}")
+            raise
 
 
 # ── DAG 태스크 연결 ────────────────────────────────────
 t1 = PythonOperator(task_id="poll_groupware_db", python_callable=poll_groupware_db, dag=dag)
 t2 = PythonOperator(task_id="classify_doc",      python_callable=classify_doc,      dag=dag)
 t3 = PythonOperator(task_id="generate_sql",      python_callable=generate_sql,      dag=dag)
-t4 = PythonOperator(task_id="print_results",     python_callable=print_results,     dag=dag)
+t4 = PythonOperator(task_id="notify_slack",      python_callable=notify_slack,      dag=dag)
 
 t1 >> t2 >> t3 >> t4

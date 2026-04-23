@@ -116,23 +116,17 @@ LIMIT 10
 
 ## 환경변수 (.env)
 
-```
-AIRFLOW_UID=501
+`.env` 파일에 아래 항목을 설정한다. (실제 값은 팀 내부 공유)
 
-# 그룹웨어 DB
-GW_DB_HOST=
-GW_DB_PORT=13306
-GW_DB_USER=
-GW_DB_PASSWORD=
-GW_DB_NAME=neos
-
-# Claude API (사내 프록시)
-ANTHROPIC_BASE_URL=<사내_프록시_URL>
-ANTHROPIC_API_KEY=
-
-# 마지막 처리한 doc_id
-LAST_DOC_ID=0
-```
+| 변수 | 설명 |
+|------|------|
+| `AIRFLOW_UID` | Docker 실행 UID |
+| `GW_DB_HOST/PORT/USER/PASSWORD/NAME` | 그룹웨어 DB 접속 정보 |
+| `ANTHROPIC_BASE_URL` | 사내 Claude API 프록시 URL |
+| `ANTHROPIC_API_KEY` | 사내 부서 API 키 |
+| `SLACK_BOT_TOKEN` | Slack 봇 토큰 |
+| `SLACK_CHANNEL` | Slack 채널 ID |
+| `LAST_DOC_ID` | 마지막 처리한 doc_id (초기값 0) |
 
 ---
 

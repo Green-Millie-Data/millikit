@@ -78,6 +78,8 @@ x-airflow-common:
     ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     LAST_DOC_ID: ${LAST_DOC_ID:-0}
+    SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+    SLACK_CHANNEL: ${SLACK_CHANNEL}
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
