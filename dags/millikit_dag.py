@@ -22,17 +22,6 @@ dag = DAG(
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# 유형 → fewshot 파일명 매핑
-FEWSHOT_FILES = {
-    "이벤트_참여자":    "fewshot_event.md",
-    "알림_신청자":      "fewshot_notify.md",
-    "마케팅_구독조건":  "fewshot_marketing.md",
-    "기타_특수":        "fewshot_etc.md",
-}
-
-# 이벤트_참여자 FewShot은 12개로 크므로 최근 N개만 사용
-EVENT_FEWSHOT_LIMIT = 5
-
 
 # ── Task 1: 그룹웨어 DB 폴링 ───────────────────────────
 def poll_groupware_db(**context):
@@ -124,7 +113,12 @@ def classify_doc(**context):
 
         raw = msg.content[0].text.strip()
         try:
-            result = json.loads(raw.replace("```json", "").replace("```", "").strip())
+            if "```" in raw:
+                json_str = raw.split("```json")[-1].split("```")[0].strip()
+            else:
+                start, end = raw.index("{"), raw.rindex("}") + 1
+                json_str = raw[start:end]
+            result = json.loads(json_str)
         except Exception:
             result = {"doc_id": doc["doc_id"], "type": "기타_특수", "reason": "파싱 실패", "parse_error": True}
 
@@ -135,7 +129,7 @@ def classify_doc(**context):
     return classified
 
 
-# ── Task 3: SQL 생성 (2차 Claude — 유형별 FewShot 로드) ─
+# ── Task 3: SQL 생성 (2차 Claude — 스키마 + FewShot 로드) ─
 def generate_sql(**context):
     import anthropic
     import json
@@ -150,27 +144,35 @@ def generate_sql(**context):
     # doc_id → 분류 결과 매핑
     type_map = {c["doc_id"]: c["type"] for c in classified}
 
+    # 스키마 + FewShot 로드 (모든 결재에 공통 적용)
+    schema_path = PROMPTS_DIR / "schema.md"
+    fewshot_path = PROMPTS_DIR / "fewshot_all.md"
+    schema = schema_path.read_text(encoding="utf-8") if schema_path.exists() else "(스키마 없음)"
+    fewshot = fewshot_path.read_text(encoding="utf-8") if fewshot_path.exists() else "(FewShot 없음)"
+
+    system_content = (
+        "당신은 밀리의서재 개인정보 추출 BigQuery SQL 전문가입니다.\n\n"
+        "## 규칙\n"
+        "- mem_seq(회원번호)만 추출 — 개인정보 직접 추출 금지\n"
+        "- 테이블은 millie-analysis GCP 프로젝트만 사용\n"
+        "- 공통 필터 항상 포함: test_yn='N', millie_yn='N', dormant_yn='N', member_status != '탈퇴회원'\n"
+        "- 조건 불명확 시 SQL 대신 확인 필요 사항을 명시\n"
+        "- BigQuery 표준 SQL 문법 사용 (백틱으로 테이블 경로 감싸기)\n\n"
+        "## 테이블 스키마\n"
+        f"{schema}\n\n"
+        "## 과거 처리 예시\n"
+        f"{fewshot}"
+    )
+
     client = anthropic.Anthropic()
     results = []
 
     for doc in docs:
         doc_type = type_map.get(doc["doc_id"], "기타_특수")
-        fewshot = _load_fewshot(doc_type)
 
-        # 캐싱 대상: 규칙 + FewShot (고정 내용) → system에 cache_control 적용
-        # 변동 내용(결재 제목·본문)은 user로 분리
-        system_content = (
-            "당신은 밀리의서재 개인정보 추출 SQL 전문가입니다.\n\n"
-            "## 규칙\n"
-            "- mem_seq(회원번호)만 추출 — 개인정보 직접 추출 금지\n"
-            "- 테이블은 millie-analysis 프로젝트만 사용\n"
-            "- 공통 필터 항상 포함: test_yn='N', millie_yn='N', dormant_yn='N', member_status != '탈퇴회원'\n"
-            "- 조건 불명확 시 SQL 대신 확인 필요 사항 명시\n\n"
-            f"## 과거 유사 처리 예시 [{doc_type}]\n"
-            f"{fewshot}"
-        )
-
+        # 변동 내용(결재 제목·본문)만 user로 분리
         user_content = (
+            f"결재 유형: {doc_type}\n"
             f"결재 제목: {doc['doc_title']}\n"
             f"결재 내용:\n{doc['doc_contents']}\n\n"
             f"반드시 JSON으로만 응답:\n"
@@ -193,8 +195,14 @@ def generate_sql(**context):
 
         raw = msg.content[0].text.strip()
         try:
-            result = json.loads(raw.replace("```json", "").replace("```", "").strip())
-        except Exception:
+            if "```" in raw:
+                json_str = raw.split("```json")[-1].split("```")[0].strip()
+            else:
+                start, end = raw.index("{"), raw.rindex("}") + 1
+                json_str = raw[start:end]
+            result = json.loads(json_str)
+        except Exception as e:
+            print(f"[{doc['doc_id']}] JSON 파싱 실패: {e}\nRAW: {raw[:300]}")
             result = {"doc_id": doc["doc_id"], "raw": raw, "parse_error": True}
 
         results.append(result)
@@ -204,77 +212,107 @@ def generate_sql(**context):
     return results
 
 
-def _load_fewshot(doc_type: str) -> str:
-    """유형에 맞는 FewShot 파일 로드. 이벤트_참여자는 최근 N개만."""
-    fname = FEWSHOT_FILES.get(doc_type, "fewshot_etc.md")
-    path = PROMPTS_DIR / fname
-
-    if not path.exists():
-        return "(FewShot 파일 없음)"
-
-    content = path.read_text(encoding="utf-8")
-
-    # 이벤트_참여자는 예시가 많으므로 마지막 N개만 사용
-    if doc_type == "이벤트_참여자":
-        sections = content.split("\n## ")
-        header = sections[0]
-        examples = sections[1:]
-        selected = examples[-EVENT_FEWSHOT_LIMIT:]
-        content = header + "\n## " + "\n## ".join(selected)
-
-    return content
-
-
-# ── Task 4: Slack 알림 ────────────────────────────────
-def notify_slack(**context):
+# ── Task 4: Jira 하위작업 생성 + SQL 초안 댓글 ───────────
+def create_jira_tickets(**context):
     import os
-    from slack_sdk import WebClient
-    from slack_sdk.errors import SlackApiError
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
 
-    results = context["ti"].xcom_pull(key="sql_results", task_ids="generate_sql")
-    if not results:
-        print("결과 없음 — Slack 알림 스킵")
+    docs = context["ti"].xcom_pull(key="new_docs", task_ids="poll_groupware_db")
+    sql_results = context["ti"].xcom_pull(key="sql_results", task_ids="generate_sql")
+
+    if not docs or not sql_results:
+        print("처리할 데이터 없음")
         return
 
-    client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
-    channel = os.environ["SLACK_CHANNEL"]
+    base_url = os.environ["JIRA_BASE_URL"]
+    auth = HTTPBasicAuth(os.environ["JIRA_EMAIL"], os.environ["JIRA_API_TOKEN"])
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    parent_issue = os.environ["JIRA_PARENT_ISSUE"]
 
-    for r in results:
-        doc_id       = r.get("doc_id", "?")
-        req_type     = r.get("request_type", "?")
-        conditions   = r.get("conditions", "")
-        sql_draft    = r.get("sql_draft", "")
+    doc_map = {d["doc_id"]: d for d in docs}
+    created_issues = []
+
+    for r in sql_results:
+        doc_id     = r.get("doc_id")
+        doc        = doc_map.get(doc_id, {})
+        req_type   = r.get("request_type", "기타_특수")
+        conditions = r.get("conditions", "")
+        sql_draft  = r.get("sql_draft", "")
         needs_review = r.get("needs_review", True)
         parse_error  = r.get("parse_error", False)
 
-        review_flag = ":warning: *검토 필요*" if needs_review else ":white_check_mark: 검토 불필요"
+        doc_title = doc.get("doc_title", f"doc_id {doc_id}")
+        requester = f"{doc.get('user_nm', '')} ({doc.get('dept_nm', '')})"
 
+        # 1. 하위작업 생성
+        issue_payload = {
+            "fields": {
+                "project": {"key": "MIDAS"},
+                "parent": {"key": parent_issue},
+                "summary": f"[개인정보 추출] {doc_title}",
+                "issuetype": {"id": "10209"},
+                "description": {
+                    "type": "doc", "version": 1,
+                    "content": [
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": f"그룹웨어 결재 doc_id: {doc_id}"}
+                        ]},
+                        {"type": "paragraph", "content": [
+                            {"type": "text", "text": f"요청자: {requester}"}
+                        ]},
+                    ]
+                }
+            }
+        }
+
+        resp = requests.post(
+            f"{base_url}/rest/api/3/issue",
+            auth=auth, headers=headers, data=json.dumps(issue_payload)
+        )
+        resp.raise_for_status()
+        issue_key = resp.json()["key"]
+        print(f"[{doc_id}] Jira 하위작업 생성: {issue_key}")
+
+        # 2. SQL 초안 댓글
+        review_text = "⚠️ 검토 필요" if needs_review else "✅ 검토 불필요"
         if parse_error:
-            text = (
-                f":x: *[millikit] doc_id {doc_id} — 파싱 오류*\n"
-                f"원문:\n```{sql_draft}```"
-            )
+            comment_text = f"❌ SQL 파싱 오류\n\n원문:\n{sql_draft}"
+            comment_blocks = [
+                {"type": "paragraph", "content": [{"type": "text", "text": "❌ SQL 파싱 오류 — 수동 확인 필요"}]}
+            ]
         else:
-            text = (
-                f":memo: *[millikit] 개인정보 추출 SQL 초안* — doc_id `{doc_id}`\n"
-                f"• 유형: `{req_type}`\n"
-                f"• 조건: {conditions}\n"
-                f"• {review_flag}\n\n"
-                f"*SQL 초안*\n```{sql_draft}```"
-            )
+            comment_blocks = [
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "📋 SQL 초안 자동 생성", "marks": [{"type": "strong"}]}
+                ]},
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": f"유형: {req_type}  |  조건: {conditions}  |  {review_text}"}
+                ]},
+                {"type": "codeBlock", "attrs": {"language": "sql"},
+                 "content": [{"type": "text", "text": sql_draft}]},
+            ]
 
-        try:
-            client.chat_postMessage(channel=channel, text=text)
-            print(f"[{doc_id}] Slack 전송 완료")
-        except SlackApiError as e:
-            print(f"[{doc_id}] Slack 전송 실패: {e.response['error']}")
-            raise
+        comment_payload = {
+            "body": {"type": "doc", "version": 1, "content": comment_blocks}
+        }
+        resp = requests.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/comment",
+            auth=auth, headers=headers, data=json.dumps(comment_payload)
+        )
+        resp.raise_for_status()
+        print(f"[{doc_id}] {issue_key} SQL 댓글 추가 완료")
+        created_issues.append(issue_key)
+
+    context["ti"].xcom_push(key="created_issues", value=created_issues)
+    return created_issues
 
 
 # ── DAG 태스크 연결 ────────────────────────────────────
-t1 = PythonOperator(task_id="poll_groupware_db", python_callable=poll_groupware_db, dag=dag)
-t2 = PythonOperator(task_id="classify_doc",      python_callable=classify_doc,      dag=dag)
-t3 = PythonOperator(task_id="generate_sql",      python_callable=generate_sql,      dag=dag)
-t4 = PythonOperator(task_id="notify_slack",      python_callable=notify_slack,      dag=dag)
+t1 = PythonOperator(task_id="poll_groupware_db",   python_callable=poll_groupware_db,   dag=dag)
+t2 = PythonOperator(task_id="classify_doc",        python_callable=classify_doc,        dag=dag)
+t3 = PythonOperator(task_id="generate_sql",        python_callable=generate_sql,        dag=dag)
+t4 = PythonOperator(task_id="create_jira_tickets", python_callable=create_jira_tickets, dag=dag)
 
 t1 >> t2 >> t3 >> t4

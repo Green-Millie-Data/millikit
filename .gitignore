@@ -3,3 +3,7 @@ logs/
 __pycache__/
 *.pyc
 .idea/
+.DS_Store
+test_sql_gen.py
+dags/prompts/schema.md
+dags/prompts/fewshot_all.md
