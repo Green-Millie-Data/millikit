@@ -50,10 +50,10 @@ def poll_jira_status(**context):
     return keys
 
 
-# ── Task 2: BQ 실행 → GCS → Jira 댓글 ────────────────
+# ── Task 2: 댓글에서 최종 SQL 추출 → BQ 실행 → GCS → Jira 댓글 ────
 def execute_and_deliver(**context):
-    """TODO Phase 2-3: BigQuery 실행 + GCS Signed URL + Jira 댓글"""
     import os
+    import re
     import json
     import requests
     from requests.auth import HTTPBasicAuth
@@ -68,30 +68,68 @@ def execute_and_deliver(**context):
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
     for key in issue_keys:
-        print(f"[{key}] BigQuery 실행 예정 (TODO)")
+        # ── 댓글 목록 조회 ─────────────────────────────
+        resp = requests.get(
+            f"{base_url}/rest/api/3/issue/{key}/comment?orderBy=created",
+            auth=auth, headers=headers
+        )
+        resp.raise_for_status()
+        comments = resp.json().get("comments", [])
+
+        # ── 가장 최근 코드블록 SQL 추출 ────────────────
+        # Jira ADF: codeBlock 노드에서 SQL 추출 (역순 탐색)
+        final_sql = None
+        for comment in reversed(comments):
+            sql = _extract_sql_from_adf(comment.get("body", {}))
+            if sql:
+                final_sql = sql
+                print(f"[{key}] 최종 SQL 추출 완료 (댓글 id={comment['id']})")
+                break
+
+        if not final_sql:
+            print(f"[{key}] SQL 코드블록 없음 — 스킵")
+            _post_comment(base_url, key, auth, headers,
+                          "⚠️ 검토완료 상태이나 SQL 코드블록을 찾을 수 없습니다. 댓글에 SQL을 추가 후 다시 전환해주세요.")
+            continue
+
+        print(f"[{key}] 실행할 SQL:\n{final_sql[:300]}")
 
         # TODO: BigQuery 실행 + CSV 추출
         # TODO: GCS 업로드 + Signed URL 생성 (7일 만료)
+        # TODO: 작업 완료 상태로 전환
 
-        # 임시 댓글
-        comment_payload = {
-            "body": {
-                "type": "doc", "version": 1,
-                "content": [{"type": "paragraph", "content": [
-                    {"type": "text", "text": "⏳ 검토완료 확인. BigQuery 실행 자동화 준비 중입니다."}
-                ]}]
-            }
+        # 임시: SQL 확인 댓글
+        _post_comment(base_url, key, auth, headers,
+                      f"⏳ SQL 확인 완료. BigQuery 실행 자동화 준비 중입니다.\n\n실행 예정 SQL:\n```sql\n{final_sql}\n```")
+        print(f"[{key}] SQL 확인 댓글 추가 완료")
+
+
+def _extract_sql_from_adf(body: dict) -> str:
+    """Jira ADF body에서 codeBlock 노드의 텍스트를 추출."""
+    if not body:
+        return ""
+    for block in body.get("content", []):
+        if block.get("type") == "codeBlock":
+            texts = [n.get("text", "") for n in block.get("content", []) if n.get("type") == "text"]
+            sql = "".join(texts).strip()
+            if sql:
+                return sql
+    return ""
+
+
+def _post_comment(base_url, issue_key, auth, headers, text: str):
+    payload = {
+        "body": {
+            "type": "doc", "version": 1,
+            "content": [{"type": "paragraph", "content": [
+                {"type": "text", "text": text}
+            ]}]
         }
-        resp = requests.post(
-            f"{base_url}/rest/api/3/issue/{key}/comment",
-            auth=auth, headers=headers, data=json.dumps(comment_payload)
-        )
-        resp.raise_for_status()
-        print(f"[{key}] 임시 댓글 추가 완료")
-
-        # TODO: 작업 완료 상태로 전환 (BQ 성공 후)
-        # transition_payload = {"transition": {"id": "2"}}  # 작업 완료 transition id
-        # requests.post(f"{base_url}/rest/api/3/issue/{key}/transitions", ...)
+    }
+    requests.post(
+        f"{base_url}/rest/api/3/issue/{issue_key}/comment",
+        auth=auth, headers=headers, data=json.dumps(payload)
+    ).raise_for_status()
 
 
 # ── DAG 태스크 연결 ───────────────────────────────────

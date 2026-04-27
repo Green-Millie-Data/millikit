@@ -37,8 +37,13 @@ def poll_groupware_db(**context):
         charset="utf8mb4",
     )
 
-    last_id = int(os.environ.get("LAST_DOC_ID", 0))
+    # TODO (운영 전환 시): Airflow Variable로 LAST_DOC_ID 관리
+    #   from airflow.models import Variable
+    #   last_id = int(Variable.get("millikit_last_doc_id", default_var=0))
+    #   → 처리 완료 후 Variable.set("millikit_last_doc_id", max(doc_id))
+    #   → WHERE doc_id > last_id / ORDER BY doc_id ASC 로 변경
 
+    # 테스트: 최신 10건 조회
     sql = """
         SELECT ad.doc_id,
                ad.doc_no,
@@ -56,13 +61,12 @@ def poll_groupware_db(**context):
             ON adc.doc_id = adcw.doc_id
         WHERE ad.form_id = 144
           AND ad.doc_sts IN (30, 90)
-          AND ad.doc_id > %s
-        ORDER BY ad.doc_id ASC
+        ORDER BY ad.doc_id DESC
         LIMIT 10
     """
 
     with conn.cursor(pymysql.cursors.DictCursor) as cur:
-        cur.execute(sql, (last_id,))
+        cur.execute(sql)
         rows = cur.fetchall()
 
     conn.close()
@@ -100,7 +104,7 @@ def classify_doc(**context):
 
 결재 제목: {doc['doc_title']}
 결재 내용:
-{doc['doc_contents'][:1000]}
+{doc['doc_contents']}
 
 반드시 JSON으로만 응답:
 {{"doc_id": {doc['doc_id']}, "type": "유형", "reason": "한 줄 근거"}}"""
@@ -303,6 +307,37 @@ def create_jira_tickets(**context):
         )
         resp.raise_for_status()
         print(f"[{doc_id}] {issue_key} SQL 댓글 추가 완료")
+
+        # 안내문 댓글
+        guide_blocks = [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "📌 검토 안내", "marks": [{"type": "strong"}]}
+            ]},
+            {"type": "bulletList", "content": [
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": "위 SQL 초안이 맞으면 → 상태를 "},
+                    {"type": "text", "text": "검토완료", "marks": [{"type": "strong"}]},
+                    {"type": "text", "text": "로 전환해주세요. BigQuery 실행이 자동으로 시작됩니다."},
+                ]}]},
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": "SQL 수정이 필요하면 → 수정된 SQL을 "},
+                    {"type": "text", "text": "코드블록 댓글로 추가", "marks": [{"type": "strong"}]},
+                    {"type": "text", "text": "한 뒤 검토완료로 전환해주세요. 가장 최근 코드블록 SQL이 실행됩니다."},
+                ]}]},
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [
+                    {"type": "text", "text": "조건 불명확 시 → 기안자에게 확인 후 재검토해주세요. 검토완료 전환 전까지 자동 실행되지 않습니다."},
+                ]}]},
+            ]},
+        ]
+        guide_payload = {
+            "body": {"type": "doc", "version": 1, "content": guide_blocks}
+        }
+        resp = requests.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/comment",
+            auth=auth, headers=headers, data=json.dumps(guide_payload)
+        )
+        resp.raise_for_status()
+        print(f"[{doc_id}] {issue_key} 안내문 댓글 추가 완료")
         created_issues.append(issue_key)
 
     context["ti"].xcom_push(key="created_issues", value=created_issues)
